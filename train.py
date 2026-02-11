@@ -16,7 +16,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, build_scaling_rotation
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
@@ -74,7 +74,7 @@ def training(
 
         iter_start.record()
 
-        gaussians.update_learning_rate(iteration)
+        xyz_lr = gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -250,6 +250,34 @@ def training(
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
+                if mcmc:
+                    RS = build_scaling_rotation(
+                        torch.cat(
+                            [
+                                gaussians.get_scaling,
+                                torch.zeros_like(gaussians.get_scaling),
+                            ],
+                            dim=-1,
+                        ),
+                        gaussians.get_rotation,
+                    )
+
+                    actual_covariance = RS @ RS.transpose(1, 2)
+
+                    def op_sigmoid(x, k=100, x0=0.995):
+                        return 1 / (1 + torch.exp(-k * (x - x0)))
+
+                    noise = (
+                        torch.randn_like(gaussians._xyz)
+                        * (op_sigmoid(1 - gaussians.get_opacity))
+                        * opt.noise_lr
+                        * xyz_lr
+                    )
+                    noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(
+                        -1
+                    )
+                    gaussians._xyz.add_(noise)
 
             if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
